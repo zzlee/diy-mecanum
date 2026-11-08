@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TurboPi 感測器儀表板</title>
+<style>
+:root{
+  --bg:#0d1117; --card:#161b22; --line:#263040; --txt:#e6edf3;
+  --dim:#8b98a9; --good:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 ui-sans-serif,system-ui,"Noto Sans TC","Noto Sans CJK TC",sans-serif;padding:16px 18px 40px}
+h1{font-size:17px;margin:0 0 2px;letter-spacing:.3px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+.pills{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px}
+.pill{border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:12px;background:var(--card);display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:#4b5563;flex:none}
+.on .dot{background:var(--good);box-shadow:0 0 7px var(--good)}
+.off .dot{background:var(--bad);box-shadow:0 0 7px var(--bad)}
+.unknown .dot{background:var(--warn)}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+.card h2{font-size:12px;margin:0 0 9px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.big{font-size:31px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
+.u{font-size:13px;color:var(--dim);font-weight:400;margin-left:4px}
+.note{font-size:11.5px;color:var(--dim);margin-top:7px;line-height:1.45}
+.hz{font-size:11px;color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0;white-space:nowrap}
+.dead{opacity:.62}
+.kv{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-variant-numeric:tabular-nums;font-size:12.5px}
+.kv span{color:var(--dim)}
+.bar{height:7px;background:#0a0e14;border-radius:4px;margin-top:9px;overflow:hidden;border:1px solid var(--line)}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),#3d8b5f);transition:width .3s}
+.flag{font-size:12px;padding:5px 8px;border-radius:6px;margin-top:8px;border:1px solid}
+.f-good{background:rgba(63,185,80,.09);border-color:rgba(63,185,80,.35);color:#7ee787}
+.f-warn{background:rgba(210,153,34,.09);border-color:rgba(210,153,34,.4);color:#e3b341}
+.f-bad{background:rgba(248,81,73,.11);border-color:rgba(248,81,73,.45);color:#ffa198}
+.f-unk{background:rgba(88,166,255,.08);border-color:rgba(88,166,255,.35);color:#a9d1ff}
+/* 相機：兩層 <img> 交錯淡入，新幀解碼完成才換面 → 永遠不會出現空白/載入中 */
+.camwrap{position:relative;aspect-ratio:4/3;background:#05070a;border-radius:7px;overflow:hidden}
+.camwrap img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .22s ease}
+.camwrap img.show{opacity:1}
+.camwrap .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5b6878;font-size:12px}
+.camwrap.frozen{filter:saturate(.45) brightness(.8)}
+.row{display:flex;align-items:center;gap:9px;margin-top:9px;font-size:12.5px}
+.row span{color:var(--dim);width:92px;flex:none}
+.row input[type=range]{flex:1;accent-color:var(--acc)}
+.row b{width:44px;text-align:right;font-variant-numeric:tabular-nums}
+button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer;font-family:inherit}
+button:hover{background:#2d333b;border-color:#3d444d}
+button:disabled{opacity:.5;cursor:wait}
+.foot{margin-top:20px;font-size:11.5px;color:var(--dim);border-top:1px solid var(--line);padding-top:12px}
+.tag{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:11px;margin-right:4px}
+</style>
+</head>
+<body>
+<h1>TurboPi 感測器即時儀表板</h1>
+<div class="sub">目標 <b id="pihost">…</b> ｜ rosbridge :9090 + SSH vcgencmd + web_video_server :8080 ｜ <b>唯讀，不會驅動馬達</b> ｜ <span id="clock"></span></div>
+<div class="pills" id="pills"></div>
+<div class="grid" id="grid"></div>
+<div class="foot">
+  <span class="tag">🟢 有資料</span><span class="tag">⚫ 無資料</span>
+  已知限制：<b>IMU</b> 的 <code>imu_raw</code> 因主控板 MCU 從不送出 <code>func=7</code> 封包而永遠無資料；
+  <code>battery</code> 量的是電源軌而非電池電量。影像中斷時會<b>保留最後一幀</b>（变灰）而不是清空。
+  本 app 不會發送任何 <code>cmd_vel</code> 或 <code>set_*</code> 指令。
+</div>
+<script>
+const grid=document.getElementById('grid'), pills=document.getElementById('pills');
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const r3=x=>typeof x==='number'?(Math.abs(x)<1e6?+x.toFixed(3):x):x;
+function fmt(v){
+  if(v==null) return '<div class="big" style="color:#4b5563">—</div>';
+  if(typeof v==='object') return `<div class="kv">`+Object.entries(v)
+    .filter(([,x])=>x!==undefined).map(([k,x])=>`<span>${esc(k)}</span><b>${esc(typeof x==='number'?r3(x):JSON.stringify(x))}</b>`).join('')+`</div>`;
+  return `<div class="big">${esc(v)}</div>`;
+}
+const SENSORS=['/ros_robot_controller/battery','/sonar_controller/get_distance','/camera_info',
+               '/ros_robot_controller/imu_raw','/ros_robot_controller/button','/ros_robot_controller/sbus','/ros_robot_controller/joy'];
+
+/* ============ 卡片只建立一次，之後全部原地更新 ============
+   （舊版每個週期 grid.innerHTML='' 重建 DOM → <img> 被銷毀 → 一直閃「載入中」）*/
+const C={};                     // key → {el, ...refs}
+function mk(key,title,html,cls=''){const d=document.createElement('div');d.className='card '+cls;
+  d.innerHTML=`<h2><span class="t">${esc(title)}</span><span class="hz h"></span></h2>${html}`;
+  d.dataset.key=key; C[key]={el:d,h2t:d.querySelector('.t'),h:d.querySelector('.h')}; grid.appendChild(d); return C[key];}
+
+function buildOnce(){
+  if(buildOnce.done) return; buildOnce.done=true;
+  mk('power','🔌 供電 / 降頻',`<div class="big bv">—</div><div class="flag pv f-unk"></div><div class="flag tv f-unk"></div><div class="kv k"></div><div class="note">判讀：<b>&gt;6000</b> ⇒ 2S 電池總壓(mV)；<b>≈4300–5700</b> ⇒ 5V 電源軌（隨外部電源跳動，不等於電池電量）</div>`);
+  // 相機（雙層 img）
+  const cam=mk('cam','📷 相機',`<div class="camwrap"><div class="ph">等待第一幀…</div>
+    <img id="cam0" alt=""><img id="cam1" alt=""></div><div class="note n">—</div>`);
+  cam.wrap=cam.el.querySelector('.camwrap'); cam.imgs=[document.getElementById('cam0'),document.getElementById('cam1')];
+  cam.ph=cam.el.querySelector('.ph'); cam.n=cam.el.querySelector('.n'); cam.n.style.minHeight='2.6em';
+  mk('pwm','🔧 PWM 舵機（唯讀診斷）',`<button class="b">讀取位置（唯讀 service call）</button><div class="note s"></div><div class="kv k"></div>`);
+  // 雲台控制（致動）—— 預設鎖定；範圍/節流/供電安全門全部在服端
+  const tilt=mk('tilt','🎛 雲台控制',`<div class="lock"><button class="u">🔒 解鎖控制</button>
+      <span class="note" style="display:inline;margin:0 0 0 8px">預設只允許 1400–1600（約 ±6°），範圍與節流由服端硬管</span></div>
+    <div class="body" style="display:none">
+      <label class="row"><span>ID2 pan 左右</span><input type="range" class="r2" min="1400" max="1600" value="1500" step="5"><b class="v2">1500</b></label>
+      <label class="row"><span>ID1 tilt 上下</span><input type="range" class="r1" min="1400" max="1600" value="1500" step="5"><b class="v1">1500</b></label>
+      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:9px">
+        <button class="mv">移動</button><button class="ce">回中</button>
+        <button class="rb">讀回位置</button><button class="kill" style="border-color:#5c2b2b">緊急上鎖</button>
+      </div>
+      <label class="note" style="display:block;margin-top:9px"><input type="checkbox" class="wide"> 允許大幅範圍（1000–2000；可能頂到機械終點造成堵轉）</label>
+    </div>
+    <div class="note st"></div><div class="kv back"></div>`);
+  wireTilt(tilt);
+  // 四轮驅動（預設鎖定 + 服端看門狗）
+  const drv=mk('drive','🚗 四轮驅動（麥克納姆）',`
+    <button class="stop" style="width:100%;background:#5c1f1f;border-color:#8c2f2f;font-weight:700;padding:11px">STOP（立刻歸零並解除）</button>
+    <div class="lock" style="margin-top:9px;display:flex;gap:7px;flex-wrap:wrap"><button class="arm">取得控制權（先偵測 2.2 秒有無別人抢 /cmd_vel）</button><button class="clr" style="display:none;border-color:#8c6a2f">解除急停</button></div>
+    <div class="body" style="display:none">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px">
+        <span></span><button class="f">▲ 前進</button><span></span>
+        <button class="l">◀ 左移</button><button class="z">■ 停</button><button class="r">右移 ▶</button>
+        <span></span><button class="bb">▼ 後退</button><span></span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px">
+        <button class="yl">↺ 左轉</button><span></span><button class="yr">右轉 ↻</button>
+      </div>
+      <label class="row"><span>力度</span><input type="range" class="sc" min="20" max="100" value="100"><b class="sv">100%</b></label>
+      <div class="bar"><i class="cd" style="width:100%"></i></div>
+      <div class="note keys">按住才動（或鍵盤 ↑↓←→ / WASD 平移，Q/E 旋轉）。放開立即歸零。<br>
+        ⚠ 實測啟動門檻（地磚）：<b>前進 20% / 後退 18% 占空比</b>，低於此會「有馬達聲但不會動」。
+        實速約為命令值的 <b>1.4 倍</b>（無輪速回讀）。</div>
+    </div>
+    <div class="note dst"></div>`);
+  wireDrive(drv);
+  mk('ros','🤖 ROS 堆疊 / 系統',`<div class="kv k"></div>`);
+  SENSORS.forEach(t=>mk('s:'+t,'·',`<div class="bv"></div><div class="note n"></div>`));
+  C['pwm'].el.querySelector('.b').onclick=askPwm;
+}
+
+/* ---------- 各卡片更新 ---------- */
+function upPills(s){
+  const y=s.system||{};
+  const P=(l,c,e='')=>{const d=document.createElement('div');d.className=`pill ${c}`;
+    d.innerHTML=`<i class="dot"></i>${l}${e?` <b style="margin-left:4px">${esc(e)}</b>`:''}`;return d;};
+  pills.innerHTML='';
+  pills.append(P('SSH',y.up?'on':'off'),
+    P('sshd :22',s.ports[22]?'on':(s.ports[22]===false?'off':'unknown')),
+    P('web_video :8080',s.ports[8080]?'on':(s.ports[8080]===false?'off':'unknown')),
+    P('rosbridge :9090',s.ports[9090]?'on':(s.ports[9090]===false?'off':'unknown')),
+    P('ROS 節點',y.up?'on':'off',y.rosNodes??''),
+    P('供電',(y.throttled==='0x0'||!y.throttled)?'on':'off',y.throttled||''));
+}
+function upPower(s){
+  const c=C.power, y=s.system||{}, p=s.power||{}, b=s.topics['/ros_robot_controller/battery'];
+  c.h.textContent=y.up?'SSH ok':'SSH 不通';
+  c.el.querySelector('.bv').innerHTML=`${esc(typeof b?.last?.value==='number'?b.last.value:'—')}<span class="u">battery raw</span>`;
+  const pv=c.el.querySelector('.pv'); pv.className='flag pv '+( {good:'f-good',warn:'f-warn',bad:'f-bad',unknown:'f-unk'}[p.level]||'f-unk');
+  pv.textContent=p.text||'—';
+  const tv=c.el.querySelector('.tv'), bad=y.throttledFlags&&y.throttledFlags.length;
+  tv.className='flag tv '+(y.throttled==='0x0'?'f-good':(bad?'f-bad':'f-warn'));
+  tv.innerHTML=`throttled = <b>${esc(y.throttled??'NA')}</b>${bad?'<br>'+esc(y.throttledFlags.join('、')):(y.throttled==='0x0'?'｜整段過程從未發生供電不足':'')}`;
+  c.el.querySelector('.k').innerHTML=[['corevoltage',y.volts||'NA'],['SoC 溫度',y.temp||'NA'],['load 1/5/15m',y.load||'NA'],
+    ['root 分割區',y.disk||'NA'],['開機時間',y.uptimeS?Math.round(y.uptimeS/60)+' 分':'NA'],['boot_id',y.bootId||'NA']]
+    .map(([k,v])=>`<span>${k}</span><b>${esc(v)}</b>`).join('');
+}
+function upSensor(s,t){
+  const c=C['s:'+t]; if(!c) return; const d=s.topics[t]; if(!d) return;
+  const live=d.count>0 && !d.stale;
+  c.h2t.textContent=(live?'🟢 ':'⚫ ')+d.label;
+  c.h.textContent=d.hz+' Hz';
+  let body = d.last ? (d.last.kind==='num'
+      ? `<div class="big">${esc(d.last.value)}<span class="u">${t.includes('get_distance')?'mm':'raw'}</span></div>`
+      : fmt(d.last.value))
+    : `<div class="big" style="color:#4b5563">—</div>`;
+  c.el.querySelector('.bv').innerHTML=body + (t.includes('get_distance')
+      ? `<div class="bar"><i style="width:${Math.max(0,Math.min(100,(d.last.value/5000)*100))}%"></i></div>` : '');
+  const extra = t.includes('get_distance')
+      ? (d.last?.value>=5000?'｜5000 = 超量程或無回波':(d.last?`｜距障碍物約 ${(d.last.value/10).toFixed(1)} cm`:'')) : '';
+  c.el.querySelector('.n').textContent=`${d.count?`${d.count} 筆｜${d.ageS}s 前`:'這一次連線期間沒收到任何資料'}${extra}${d.hint?'｜'+d.hint:''}`;
+  c.el.classList.toggle('dead',!live);
+}
+function upTilt(s){
+  const c=C.tilt; if(!c) return; const r=s.servo; const st=c.el.querySelector('.st');
+  c.el.querySelector('.back').innerHTML = r
+    ? [['ID1 tilt 命令',r.sent[1]??'-'],['ID1 實測',r.actual[1]??'-'],['ID2 pan 命令',r.sent[2]??'-'],['ID2 實測',r.actual[2]??'-']]
+        .map(([k,v])=>`<span>${k}</span><b>${esc(v)}</b>`).join('')
+    : '<span>尚無致動記錄</span><b>—</b>';
+  if(r && r.mismatch && r.mismatch.length){
+    st.innerHTML=`<span style="color:var(--bad)">⚠️ ${esc(r.mismatch.join('；'))}</span><br>`+
+      `<span style="color:var(--dim)">已知異常：ID1 命令寫不進去（命令 1520 → 讀回仍 1500）</span>`;
+  } else if(r){ st.textContent=`✅ ${new Date(r.at).toLocaleTimeString()} 指令與讀回一致`; }
+}
+function upDrive(s){
+  const c=C.drive; if(!c) return; const m=s.motion||{};
+  c.el.querySelector('.body').style.display = m.armed?'block':'none';
+  c.el.querySelector('.lock').style.display  = m.armed?'none':'block';
+  const armBtn=c.el.querySelector('.arm');
+  const clrBtn=c.el.querySelector('.clr');
+  clrBtn.style.display = m.estopped ? 'inline-block' : 'none';
+  armBtn.style.display = m.estopped ? 'none' : 'inline-block';
+  armBtn.disabled = !!c.__busy;
+  armBtn.textContent = m.estopped?'🔒 已紧急停用（需重啟 server）':'取得控制權（先偵測 2.2 秒有無別人抢 /cmd_vel）';
+  const dst=c.el.querySelector('.dst');
+  if(m.armed){
+    const pct=m.remainMs!=null?Math.max(0,Math.min(100,m.remainMs/MOTION_MAX*100)):100;
+    c.el.querySelector('.cd').style.width=pct+'%';
+    dst.innerHTML=`🟢 已武裝｜心跳 <b>${m.heartbeatAge??'-'} ms</b>｜剩餘 <b>${((m.remainMs||0)/1000).toFixed(1)} s</b>（自動解除）｜`+
+      `看門狗 ${m.beatMs} ms｜已發 ${m.publishes} 筆`+
+      `<br><span style="color:var(--dim)">實際占空比：vx <b>${m.dutyNow?.vx??0}%</b> · vy <b>${m.dutyNow?.vy??0}%</b> · wz <b>${m.dutyNow?.wz??0}%</b></span>`+
+      (m.sonarHold?'<br><span style="color:var(--warn)">⚠️ 超音波互鎖：前方過近，前進已鎖定（仍可後退/平移）</span>':'');
+  } else {
+    c.el.querySelector('.cd').style.width='100%';
+    dst.innerHTML=(m.reason?`<span style="color:var(--dim)">上次解除：${esc(m.reason)}</span>`:'未武裝。不會發送任何 <code>cmd_vel</code>')+
+      `<br><span style="color:var(--dim)">夾限 |vx|≤${m.limits?.vx} |vy|≤${m.limits?.vy} |wz|≤${m.limits?.wz}｜時限 ${((m.maxArmMs||0)/1000)}s｜超音波互鎖 ${m.sonarMin} mm（只擋前進）</span>`;
+  }
+}
+function upRos(s){
+  const y=s.system||{};
+  C.ros.h.textContent=s.rosbridge.up?'rosbridge UP':'rosbridge DOWN';
+  C.ros.el.querySelector('.k').innerHTML=[['start_node.service',y.svc||'NA'],['容器',y.container||'NA'],
+    ['ROS 節點數',y.rosNodes??'NA'],['topic 訊息數',s.counters?.msgs??0],['影像快照數',s.counters?.snaps??0]]
+    .map(([k,v])=>`<span>${esc(k)}</span><b>${esc(v)}</b>`).join('')
+    + (s.rosbridge.err?`<span>連線錯誤</span><b style="color:var(--warn);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.rosbridge.err)}</b>`:'');
+}
+function upPwm(s){
+  const c=C.pwm, p=s.pwm||{};
+  const btn=c.el.querySelector('.b');
+  btn.disabled=!!p.busy; btn.textContent=p.busy?'查詢中（約 2–8 秒）…':'讀取位置（唯讀 service call）';
+  c.el.querySelector('.s').innerHTML = p.at
+    ? `success=<b>${esc(p.success)}</b>｜${new Date(p.at).toLocaleTimeString()}${p.err?'<br><span style="color:var(--bad)">'+esc(p.err)+'</span>':''}`
+    : '尚未查詢。此動作呼叫 <code>pwm_servo/get_state</code>（已驗證安全，不會移動舵機）';
+  c.el.querySelector('.k').innerHTML=p.positions
+    ? [['ID1 position',p.positions[0]],['ID2 position',p.positions[1]],['ID1 offset',p.offsets?.[0]],['ID2 offset',p.offsets?.[1]]]
+        .map(([k,v])=>`<span>${k}</span><b>${esc(v??'-')}</b>`).join('') : '';
+}
+function render(s){
+  buildOnce();
+  document.getElementById('pihost').textContent=s.pi;
+  document.getElementById('clock').textContent='更新 '+new Date(s.ts).toLocaleTimeString();
+  upPills(s); upPower(s); upRos(s); upPwm(s); upTilt(s); upDrive(s);
+  SENSORS.forEach(t=>upSensor(s,t));
+  document.body.style.background=(s.system&&s.system.throttled&&s.system.throttled!=='0x0')?'#1a0d0d':'var(--bg)';
+}
+/* ---------- 雲台控制 ---------- */
+let tiltUnlocked=false, tiltKilled=false;
+async function servoPost(payload, stEl){
+  stEl.textContent='發送中…';
+  try{
+    const res=await fetch('/api/servo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await res.json();
+    if(!d.ok){ stEl.innerHTML=`<span style="color:var(--warn)">🚫 ${esc(d.error)}</span>`; return null; }
+    const bad=d.mismatch&&d.mismatch.length;
+    stEl.innerHTML=bad?`<span style="color:var(--bad)">⚠️ ${esc(d.mismatch.join('；'))}</span>`
+      :`✅ ${new Date(d.at).toLocaleTimeString()} 已執行，讀回一致`;
+    try{ render(await (await fetch('/api/state')).json()); }catch{}
+    return d;
+  }catch(err){ stEl.innerHTML=`<span style="color:var(--bad)">請求失敗: ${esc(err.message)}</span>`; return null; }
+}
+function wireTilt(c){
+  const el=c.el, lock=el.querySelector('.lock'), body=el.querySelector('.body'), st=el.querySelector('.st');
+  const r1=el.querySelector('.r1'), r2=el.querySelector('.r2'), wide=el.querySelector('.wide');
+  r1.oninput=()=>el.querySelector('.v1').textContent=r1.value;
+  r2.oninput=()=>el.querySelector('.v2').textContent=r2.value;
+  wide.onchange=()=>{ for(const [r,b] of [[r1,el.querySelector('.v1')],[r2,el.querySelector('.v2')]]){
+      r.min=wide.checked?1000:1400; r.max=wide.checked?2000:1600;
+      r.value=Math.min(+r.max,Math.max(+r.min,+r.value)); b.textContent=r.value; } };
+  lock.querySelector('.u').onclick=()=>{ tiltUnlocked=true; tiltKilled=false; lock.style.display='none'; body.style.display='block';
+    st.textContent='已解鎖。'; };
+  el.querySelector('.mv').onclick=async()=>{
+    if(!tiltUnlocked||tiltKilled){ st.textContent='未解鎖或已上鎖'; return; }
+    const a=await servoPost({id:2,position:+r2.value,duration:0.5},st);      // pan 先動（實測可用）
+    if(a && !(a.mismatch&&a.mismatch.length)) await servoPost({id:1,position:+r1.value,duration:0.5},st);
+  };
+  el.querySelector('.ce').onclick=()=>{ if(!tiltUnlocked||tiltKilled) return;
+    r1.value=1500; r2.value=1500; el.querySelector('.v1').textContent=1500; el.querySelector('.v2').textContent=1500;
+    return servoPost({center:true,duration:0.8},st); };
+  el.querySelector('.rb').onclick=async()=>{
+    st.textContent='讀回中…';
+    try{ const d=await (await fetch('/api/pwm_state',{method:'POST'})).json();
+      const p=d.positions||[]; if(p[0]){r1.value=p[0]; el.querySelector('.v1').textContent=p[0];}
+      if(p[1]){r2.value=p[1]; el.querySelector('.v2').textContent=p[1];}
+      st.textContent=`實測 ID1=${p[0]??'-'} ID2=${p[1]??'-'}（offset ${d.offsets?.[0]??'-'} / ${d.offsets?.[1]??'-'}）`;
+    }catch(err){ st.textContent='讀回失敗: '+err.message; }
+  };
+  el.querySelector('.kill').onclick=()=>{
+    tiltKilled=true; tiltUnlocked=false; body.style.display='none'; lock.style.display='block';
+    lock.querySelector('.u').textContent='🔒 已上鎖，點擊重新啟用';
+    st.textContent='已上鎖。注意：已發出的位置指令不會自動復原，要回中請先解鎖。';
+  };
+}
+/* ---------- 四轮驅動 ---------- */
+const MOTION_MAX=20000;
+const held={f:false,b:false,l:false,r:false,yl:false,yr:false};
+let beatTimer=null, driving=false, scale=0.6;
+async function postMotion(path,payload){
+  try{ const r=await fetch('/api/motion/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});
+       return await r.json(); }catch(e){ return {ok:false,error:e.message}; }
+}
+function vec(){
+  const L=(window.S_&&S_.motion&&S_.motion.limits)||{vx:.15,vy:.10,wz:.60};
+  const k=scale;
+  let vx=(held.f?1:0)-(held.b?1:0), vy=(held.r?1:0)-(held.l?1:0), wz=(held.yr?1:0)-(held.yl?1:0);
+  return {vx:vx*L.vx*k, vy:vy*L.vy*k, wz:wz*L.wz*k};
+}
+async function beat(){ await postMotion('beat', vec()); }
+function startBeat(){ if(beatTimer) return; driving=true; beat(); beatTimer=setInterval(beat,220); }
+function stopBeat(){ if(beatTimer){clearInterval(beatTimer); beatTimer=null;} driving=false; postMotion('beat',{vx:0,vy:0,wz:0}); }
+function wireDrive(c){
+  const el=c.el, armBtn=el.querySelector('.arm'), sc=el.querySelector('.sc');
+  sc.oninput=()=>{ scale=+sc.value/100; el.querySelector('.sv').textContent=sc.value+'% ⇒≤duty '+Math.round(25*scale)+'%'; };
+  sc.dispatchEvent(new Event('input'));
+  armBtn.onclick=async()=>{
+    c.__busy=true; armBtn.disabled=true; armBtn.textContent='預檢中（2.2 秒）…';
+    const d=await postMotion('arm',{});
+    c.__busy=false;
+    if(!d.ok){ armBtn.disabled=false; armBtn.textContent='重試取得控制權';
+      el.querySelector('.dst').innerHTML=`<span style="color:var(--bad)">🚫 ${esc(d.error)}</span>`; return; }
+    startBeat();
+    try{ render(await (await fetch('/api/state')).json()); }catch{}
+  };
+  el.querySelector('.clr').onclick=async()=>{
+    await postMotion('clear_estop',{});
+    try{ render(await (await fetch('/api/state')).json()); }catch{}
+  };
+  el.querySelector('.stop').onclick=async()=>{
+    held.f=held.b=held.l=held.r=held.yl=held.yr=false; stopBeat();
+    await postMotion('stop',{estop:true});
+    try{ render(await (await fetch('/api/state')).json()); }catch{}
+  };
+  const hold=(cls,key)=>{ const b=el.querySelector(cls); const on=e=>{e.preventDefault();held[key]=true;}; const off=e=>{e.preventDefault();held[key]=false;};
+    b.addEventListener('pointerdown',on); b.addEventListener('pointerup',off);
+    b.addEventListener('pointerleave',off); b.addEventListener('pointercancel',off); };
+  hold('.f','f'); hold('.bb','b'); hold('.l','l'); hold('.r','r'); hold('.yl','yl'); hold('.yr','yr');
+  el.querySelector('.z').onclick=e=>{e.preventDefault(); held.f=held.b=held.l=held.r=held.yl=held.yr=false; beat();};
+}
+const KEYMAP={ArrowUp:'f',KeyW:'f',ArrowDown:'b',KeyS:'b',ArrowLeft:'l',KeyA:'l',ArrowRight:'r',KeyD:'r',KeyQ:'yl',KeyE:'yr'};
+addEventListener('keydown',e=>{ const k=KEYMAP[e.code]; if(k&&window.S_&&S_.motion&&S_.motion.armed){ held[k]=true; e.preventDefault(); }});
+addEventListener('keyup',  e=>{ const k=KEYMAP[e.code]; if(k){ held[k]=false; e.preventDefault(); }});
+addEventListener('blur',   ()=>{ held.f=held.b=held.l=held.r=held.yl=held.yr=false; if(driving) beat(); });
+document.addEventListener('visibilitychange',()=>{ if(document.hidden && driving){ held.f=held.b=held.l=held.r=held.yl=held.yr=false;
+  try{ navigator.sendBeacon('/api/motion/beat', new Blob([JSON.stringify({vx:0,vy:0,wz:0})],{type:'application/json'})); }catch{}
+  clearInterval(beatTimer); beatTimer=null; driving=false; } });
+addEventListener('beforeunload',()=>{ try{ navigator.sendBeacon('/api/motion/stop', new Blob([JSON.stringify({reason:'分頁關閉'})],{type:'application/json'})); }catch{} });
+
+async function askPwm(e){
+  e.currentTarget.disabled=true; e.currentTarget.textContent='查詢中（約 2–8 秒）…';
+  try{ await fetch('/api/pwm_state',{method:'POST'}); }catch{}
+  try{ render(await (await fetch('/api/state')).json()); }catch{}
+}
+
+/* ---------- 相機：雙層交叉淡入，失敗保留最後一幀 ---------- */
+let front=0, camBusy=false, camErrs=0, liveUrls=[];
+async function tickCam(){
+  const c=C.cam; if(!c||camBusy) return;
+  if(!(window.S_ && window.S_.ports[8080])) return;      // 8080 不通就不打請求
+  camBusy=true;
+  const imgs=c.imgs, t0=Date.now();
+  try{
+    const res=await fetch('/snapshot.jpg?ts='+Date.now());
+    if(!res.ok) throw new Error('http '+res.status);
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob);
+    const back=imgs[1-front];
+    back.src=url;
+    try{ await back.decode(); }catch{ /* decode 失敗就直接顯示，至少不會空白 */ }
+    back.classList.add('show');
+    imgs[front].classList.remove('show');
+    liveUrls.push(url);
+    while(liveUrls.length>3) URL.revokeObjectURL(liveUrls.shift());   // ✅ 釋放舊 blob URL，避免記憶體洩漏
+    if(c.ph) c.ph.style.display='none';
+    c.wrap.classList.remove('frozen');
+    camErrs=0;
+    c.h.textContent=`${(blob.size/1024).toFixed(0)} KB｜${Date.now()-t0} ms｜${new Date().toLocaleTimeString()}`;
+    c.n.textContent='走 web_video_server snapshot（刻意不訂閱 /image_raw：base64 JSON 會擠爆 rosbridge）';
+  }catch(err){
+    camErrs++;
+    if(camErrs>=2 && liveUrls.length) c.wrap.classList.add('frozen');   // 保留最後一幀，只壓暗
+    c.n.textContent=(liveUrls.length?'已保留最後一幀':'尚無影像')
+      +`｜⚠️ 影像中斷 ×${camErrs}：${err.message}（自動重試中）`;
+  }
+  camBusy=false;
+}
+setInterval(tickCam, 800);
+
+const es=new EventSource('/events');
+es.onmessage=ev=>{ try{ const s=JSON.parse(ev.data); window.S_=s; render(s);
+    if(!s.motion.armed && beatTimer){ clearInterval(beatTimer); beatTimer=null; driving=false; }   // 服端已解除 → 停心跳
+    if(s.motion.armed && !beatTimer) startBeat();                                                     // 心跳必須維持
+  }catch(err){} };
+es.onerror=()=>{ document.getElementById('pihost').textContent='本機 server 斷線，自動重連中…'; };
+</script>
+</body>
+</html>

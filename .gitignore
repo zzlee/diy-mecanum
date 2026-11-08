@@ -1,0 +1,20 @@
+# 機密與本地專屬
+SECRETS.local.md
+*.local.md
+.env
+
+# 相機快照（內含住家室內畫面，刻意不入庫；數值結論已寫進 HANDOVER/檔案）
+work/drive-test/frames/
+
+# 厂家專有源碼的**全文副本**（僅供本機比對，不在公開倉庫重散布）
+# 保留 fix.patch / REPORT.md 等「差異與說明」層級的文件
+work/pwm-servo-fix/ros_robot_controller_node.py
+work/pwm-servo-fix/ros_robot_controller_node.fixed.py
+work/pwm-servo-fix/deployed_now.py
+
+# 執行期產物
+__pycache__/
+*.pyc
+node_modules/
+nohup.out
+*.tmp

@@ -1,0 +1,36 @@
+[ROLE]: pi-coder
+[TASK]: 修好容器內 `ros_robot_controller_node.py` 的 `get_pwm_servo_state`，讓 `/ros_robot_controller/pwm_servo/get_state` 可被安全呼叫而不會殺死節點，並完成部署與實機驗證。
+[TARGET_CWD]: /home/zzlee/vibecoding/diy-mecanum/work/pwm-servo-fix
+
+**第一步：先 `read` 這個目錄裡的 `CONTEXT.md`。裡面是協調者已逐項實測過的事實（根因、要改的三處、`--symlink-install` 的生效機制、部署與重啟方式、驗證清單、紅線）。不要自己重新探索那些已經查好的事。**
+
+[重要事实摘要]
+- 目標是 Pi 上 Docker 容器 `TurboPi` 內的檔案，不是本機檔案。本目錄的 `ros_robot_controller_node.py` 只是參考拷貝。
+- 該 ROS workspace 是 `--symlink-install` 建置的 ⇒ **改 `src/` 就生效，不需要 build**；未帶 `--symlink-install` 的 `colcon build` 是禁止的。
+- 生效要靠在 Pi 主機上 `sudo systemctl restart start_node`（不是 reboot）。
+
+[BUILD_COMMAND]（這裡的「建置」＝部署＋重啟＋驗證）
+1. `sudo docker exec TurboPi cp -a <目標檔> <目標檔>.bak-20261108`
+2. 改檔（寫穿 symlink 的方式，避免 `docker cp` 破壞 symlink）
+3. `sudo docker exec TurboPi python3 -m py_compile <目標檔>`
+4. 在 Pi 主機：`sudo systemctl restart start_node`，等 90 秒
+5. `ros2 node list` 確認 `/ros_robot_controller` 在
+6. 先讀 `GetPWMServoState.srv` / `PWMServoState.msg` 取得正確欄位，再發起**讀取型** service 呼叫
+7. 存活驗證：`ros2 node list | grep -x /ros_robot_controller`、`sudo journalctl -b -u start_node --no-pager | grep -cE "has died|Traceback"` 必須為 0、呼叫後 `/ros_robot_controller/battery` 仍有資料
+
+[BOUNDARIES & RULES]
+1. 只准改 `get_pwm_servo_state` 這一個函式（簽名 + `for i in request.cmd` + 結尾改成填 `response`，**不要 `return [True, states]`**）。其他 `set_*` 回調收 `msg` 是對的，不要動。
+2. 嚴格禁止任何 git 操作（不 commit / checkout / reset / clean / stash）。
+3. 不得驅動機器人：不發 `cmd_vel`，不呼叫任何 `set_*` service 或 topic，不讓馬達/舵機移動。只做讀取型呼叫。
+4. 不 `rm -rf`、不 `git clean`、不刪 `.bak-*` 備份、不碰 Wi-Fi / NetworkManager / systemd unit 內容。
+5. 根分割區已 93%（剩 2.2G）：不要在容器內產生大檔，log 丟 `/tmp` 並收尾清掉。
+6. Pi 沒有 internet（AP 模式）：不要 apt / pip install。
+7. 自癒迴圈上限 5 次；同一錯誤連續 5 次失敗就回滾並回報 root cause（Circuit Breaker，AGENTS.md §4）。
+
+[EXPECTED_OUTPUT]
+在工作目錄留下 `fix.patch`（針對 `./ros_robot_controller_node.py` 的 unified diff）與 `ros_robot_controller_node.fixed.py`，並以 Markdown 回報：
+- 最終狀態：SUCCESS / FAILED / BLOCKED
+- 修改的檔案與行號（容器內路徑）
+- root cause 一句話
+- 驗證輸出摘要：service 實際回傳內容、`grep -c "has died"` 的數字、battery 呼叫後是否仍有資料
+- 回滾的具體指令

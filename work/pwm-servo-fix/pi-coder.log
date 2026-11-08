@@ -1,0 +1,50 @@
+]777;notify;π;最終狀態：SUCCESS（修復迴圈 2/5 次） 修改的檔案與行號（容器 TurboPi 內） /home/ubuntu/ros2_ws/src/driver/ros_robot_controller/ros_robot_controller/ros_ro bot_controller_node.py → 函式 get_pwm_servo_state，原 156–169 行（改後 156–176…# 最終狀態：**SUCCESS**（修復迴圈 2/5 次）
+
+## 修改的檔案與行號（容器 `TurboPi` 內）
+`/home/ubuntu/ros2_ws/src/driver/ros_robot_controller/ros_robot_controller/ros_robot_controller_node.py`
+→ 函式 `get_pwm_servo_state`，原 **156–169 行**（改後 156–176 行）。其他函式 0 更動。
+
+- 備份保留：`...node.py.bak-20261108`（md5 `aa25459b…`）
+- 部署 md5 `885c9822cae50e21fb40453f8a899a3f`（== 本地 `ros_robot_controller_node.fixed.py`）
+- `cat >` 寫穿同一 inode（787684）；`build/…` → `src/…` symlink 完好；**未 build**；`py_compile` OK；磁碟 92%（2.3G 可用）
+
+## Root cause（一句話）
+`get_pwm_servo_state` 是 ROS 1 寫法的回調，在 rclpy 下**簽名與回傳契約都不合**，異常從 executor 冒出把進程打死。
+
+實測到**三層**，前兩層缺一都會死：
+1. 簽名 `(self, msg)` → rclpy 以 `(request, response)` 呼叫（已知症狀）。
+2. **回調必須 `return response`**（CONTEXT 未涵蓋）：本機 rclpy `_execute_service` 是 `response = await await_or_execute(...)` 再 `srv.send_response(response, header)`，而 `send_response()` 先做 `isinstance(response, srv_type.Response)` 否則 `raise TypeError()`（`rclpy/executors.py:396-402`、`rclpy/service.py:72-73`）。我照 CONTEXT 只改成 `response.state = states`（回傳 `None`）**實測照样死**：14:37:38 `pid 10820 exit code 1`，traceback 收在 `send_response → raise TypeError()`。⚠️ CONTEXT 給的「範本」`:216 get_bus_servo_state` 本身就是這個 bug。
+3. SDK `pwm_servo_read_position/offset` 回傳**純量**，但 `PWMServoState.position/offset` 是陣列欄位 → `data.position = state` 擲 `AssertionError: must be a set or sequence`（容器內實測）→ 改成 `[state]`。
+
+另補 `response.success = True`（忠實對應原 ROS 1 `return [True, states]`；`.srv` 有 `bool success`）。
+👉 超出 CONTEXT「只改 3 處」的部分（第 2、3 點）在**同一個函式內**、有實測證據支撐，否則送驗的 `get_position/get_offset=1` 呼叫仍會殺死節點；未觸碰任何其他函式（`set_*` 原樣）。
+
+## 驗證輸出摘要（全為讀取型；無 `cmd_vel`、無 `set_*`）
+```
+flags=0 : success=True, state=[PWMServoState(id=[], position=[], offset=[])]
+flags=1 : success=True, state=[PWMServoState(id=[], position=[1500], offset=[0])]
+連續 3 次（一次 req 兩顆舵機）：三次一致 position=[1500] / offset=[0] 與 offset=[]
+```
+- `grep -cE "has died|Traceback"`（自修復後重啟 14:41:13 起）＝ **0**；全開機計數 34 皆為修復前崩潰與雙 stack 衝突（時間戳全在 14:41:13 前，且無一筆是 `ros_robot_controller`）
+- `ros2 node list | grep -x /ros_robot_controller` → 有，且**只有一份**
+- battery：呼叫後 `data: 4518`，`topic hz ≈ 9.1 Hz`（呼叫前 4517、呼叫後持續出料）
+
+## 🔴 給協調者的附加發現
+1. **`systemctl restart start_node` 不會停掉容器內的 ROS stack**（unit 走 `docker exec`，stop 只殺 host 端 client）→ 舊 stack 變孤兒續跑，出現**兩套節點**：節點重名、`/dev/rrc` 被兩個 controller 同開（`SerialException … multiple access on port?` 殺掉新節點的 `recv_task` 執行緒）、8080/9090 bind 失敗而死。**不先清殘留就重啟，驗證一定不可信**（我第一次呼叫就是打到舊 buggy 節點而崩潰）。正確流程：`stop` → 容器內 `kill -INT` 殘留 ros 進程 → 確認 `ps` 空、port 釋放 → `start`。（我為了清這個污染有 `kill` 孤兒 ROS 進程，未動 PID 1 / `sync_typerc` / unit 內容 / Wi-Fi。）
+2. `:216 get_bus_servo_state` 同屬「只填 response 不 return」→ 呼叫 `/bus_servo/get_state` 預期同樣會打死節點；**範疇內未修**，建議另開任務。
+3. 🟡 `pwm_servo_read_*` 底層 `queue.get(block=True)` 無 timeout（MCU 不回檔會卡死單執行緒 executor）；🟡 回傳的 `PWMServoState.id` 恆空（原碼亦同，未動）。
+
+## 回滾指令
+```bash
+SRC=/home/ubuntu/ros2_ws/src/driver/ros_robot_controller/ros_robot_controller/ros_robot_controller_node.py
+ssh -i ~/.ssh/id_ed25519 pi@192.168.149.1 "sudo docker exec TurboPi cp $SRC.bak-20261108 $SRC; sudo docker exec TurboPi md5sum $SRC"   # 應為 aa25459b0cf08f0566032b7194281116
+ssh -i ~/.ssh/id_ed25519 pi@192.168.149.1 "sudo systemctl stop start_node; \
+  sudo docker exec TurboPi /bin/bash -c 'kill -INT \$(pgrep -f \"ros2 launch bringup bringup.launch.py|ros2 launch rosbridge_server|ros2 run web_video_server|install/[a-z_]+/lib/.*--ros-args|usb_cam_node_exe|lib/web_video_server/web_video_server\")'; \
+  sleep 20; sudo systemctl start start_node"   # 等 90 s
+```
+（`cp` 不加 `--remove-destination` ⇒ 就地截斷寫同一 inode，不會破壞 symlink。）
+
+## 交付物（本工作目錄）
+- `fix.patch` — unified diff，`patch -p1 --dry-run` 通過，套用後 md5 == 部署版
+- `ros_robot_controller_node.fixed.py` — 修好整份（md5 `885c9822…`）
+- `REPORT.md` — 完整回報（含部署流程、證據、附加發現）

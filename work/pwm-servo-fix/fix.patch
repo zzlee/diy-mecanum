@@ -1,0 +1,35 @@
+--- a/ros_robot_controller_node.py
++++ b/ros_robot_controller_node.py
+@@ -153,20 +153,27 @@
+         if data != []:
+             self.board.pwm_servo_set_position(msg.duration, data)
+ 
+-    def get_pwm_servo_state(self, msg):
++    def get_pwm_servo_state(self, request, response):
+         states = []
+-        for i in msg.cmd:
++        for i in request.cmd:
+             data = PWMServoState()
+             if i.get_position:
+                 state = self.board.pwm_servo_read_position(i.id)
+                 if state is not None:
+-                    data.position = state
++                    # the SDK unpacks a single scalar, PWMServoState.position is uint16[]
++                    data.position = [state]
+             if i.get_offset:
+                 state = self.board.pwm_servo_read_offset(i.id)
+                 if state is not None:
+-                    data.offset = state
++                    # the SDK unpacks a single scalar, PWMServoState.offset is int16[]
++                    data.offset = [state]
+             states.append(data)
+-        return [True, states]
++        response.state = states
++        response.success = True
++        # rclpy replies with whatever the callback returns
++        # (rclpy/executors.py: _execute_service -> srv.send_response(response, header)),
++        # so the response object has to be returned here, not a ROS 1 style list.
++        return response
+ 
+     def set_bus_servo_position(self, msg):
+         data = []
