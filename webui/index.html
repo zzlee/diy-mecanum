@@ -114,7 +114,7 @@ function buildOnce(){
     <div class="body" style="display:none">
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px">
         <span></span><button class="f">▲ 前進</button><span></span>
-        <button class="l">◀ 左移</button><button class="z">■ 停</button><button class="r">右移 ▶</button>
+        <button class="l" style="opacity:.35" title="已停用：實測線性 y 會造成自轉（HANDOVER §15）">◀ 左移</button><button class="z">■ 停</button><button class="r" style="opacity:.35" title="已停用：實測線性 y 會造成自轉（HANDOVER §15）">右移 ▶</button>
         <span></span><button class="bb">▼ 後退</button><span></span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px">
@@ -122,7 +122,9 @@ function buildOnce(){
       </div>
       <label class="row"><span>力度</span><input type="range" class="sc" min="20" max="100" value="100"><b class="sv">100%</b></label>
       <div class="bar"><i class="cd" style="width:100%"></i></div>
-      <div class="note keys">按住才動（或鍵盤 ↑↓←→ / WASD 平移，Q/E 旋轉）。放開立即歸零。<br>
+      <div class="note keys">按住才動（或鍵盤 ↑↓ 前後，Q/E 旋轉）。放開立即歸零。<br>
+        🔴 <b>側移已停用</b>：實測純 <code>linear.y</code> 會讓車身自轉而不是横移（<code>HANDOVER §15</code>）。
+        請用「前後 ＋ 旋轉」組合完成所有機動。<br>
         ⚠ 實測啟動門檻（地磚）：<b>前進 20% / 後退 18% 占空比</b>，低於此會「有馬達聲但不會動」。
         實速約為命令值的 <b>1.4 倍</b>（無輪速回讀）。</div>
     </div>
@@ -287,6 +289,9 @@ function wireTilt(c){
 /* ---------- 四轮驅動 ---------- */
 const MOTION_MAX=20000;
 const held={f:false,b:false,l:false,r:false,yl:false,yr:false};
+// 🔴 側移已停用：2026-11-08 純 linear.y 脈衝實測讓車身「轉了一大圈」而非横移（HANDOVER §15）。
+// 要重新開啟：把這一行改成 true（但先做逐輪符號標定）。
+const STRAFE_ENABLED = false;
 let beatTimer=null, driving=false, scale=0.6;
 async function postMotion(path,payload){
   try{ const r=await fetch('/api/motion/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});
@@ -296,7 +301,7 @@ function vec(){
   const L=(window.S_&&S_.motion&&S_.motion.limits)||{vx:.15,vy:.10,wz:.60};
   const k=scale;
   // REP-103：y 向左為正、z 逆時針為正（wz>0=車頭往左 已於 2026-11-08 影像實證；vy 符號待實測確認）
-  let vx=(held.f?1:0)-(held.b?1:0), vy=(held.l?1:0)-(held.r?1:0), wz=(held.yl?1:0)-(held.yr?1:0);
+  let vx=(held.f?1:0)-(held.b?1:0), vy=(STRAFE_ENABLED?((held.l?1:0)-(held.r?1:0)):0), wz=(held.yl?1:0)-(held.yr?1:0);
   return {vx:vx*L.vx*k, vy:vy*L.vy*k, wz:wz*L.wz*k};
 }
 async function beat(){ await postMotion('beat', vec()); }
