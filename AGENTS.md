@@ -60,6 +60,8 @@
 
 * **遠端 GPU 伺服器**：`<GPU_HOST_USER>@<GPU_HOST>`，模型服務為 **Strata**（OpenAI 相容，**非 vLLM**；`Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata`），單卡、KV `int8`、啟用 MTP 投機解碼（`--spec 4`），Context Window 262,144。**遠端監聽 `127.0.0.1:8080`**（不是 8000）。
 * **前置條件**：遠端須先啟動 `~/qwen3_8_flash_next_dev/serve-strata.sh`（遠端服務未起時，隧道即使建通也會回傳連線錯誤）。
+  * **要能用圖片**：需 `VISION=on ./serve-strata.sh`（腳本第 57 行 `VISION="${VISION:-off}"` → 第 216 行 `--vision "$VISION"`），且模型目錄須有视觉权重（2026-11-08 前缺失，已補）。未帶 `--vision` 時塞圖會回 `HTTP 400: started without the vision encoder`。
+  * 🔴 **重啟 strata 會中斷正在運行的 `pi` session**（本機 session 的推論就落在該實例上）。重啟後須確認 `~/.pi/agent/models.json` 的 `input` 含 `"image"`，否則 `pi` 仍會丟棄圖片塊（`read` 回 `tool image omitted`）；改完以 `/model` 重載即可生效，不必重啟。
 
 #### 連接埠轉發對照 (Port Forwarding)
 | 本機端點 | 遠端端點 | 服務 / API | 備註 |
@@ -107,7 +109,7 @@ pkill -f "ssh -N.*<GPU_HOST>"; sleep 1; API_PORT_REMOTE=8080 pi-tunnel -f
 #### Provider 設定檔來源（`~/.pi/agent/models.json`）
 `pi` 的 `ttu-vllm` provider 由本機設定檔定義，派工指令不需重複指定 baseUrl：
 * `baseUrl`: `http://127.0.0.1:8000/v1`，`api`: `openai-completions`，`apiKey`: `none`
-* Model `qwen3.8-flash-next-nvfp4-nvfp4`：`contextWindow` 262144、`maxTokens` 65536、`reasoning: true`、`input: ["text"]`（strata 自報純文字）、`thinkingFormat: qwen-chat-template`
+* Model `qwen3.8-flash-next-nvfp4-nvfp4`：`contextWindow` 262144、`maxTokens` 65536、`reasoning: true`、`input: ["text","image"]`（**2026-11-08 起帶 `--vision` 上線**；此前 strata 自報純文字）、`thinkingFormat: qwen-chat-template`
 
 > **協調者授權例外**：§1.1 紅線禁止協調者親自執行建置/編譯，但 **`pi-tunnel -f` 與上述健康檢查指令為唯一獲准由協調者直接執行的環境維運操作**（僅建立通道、不觸發編譯，不產生巨量 Log）。
 
