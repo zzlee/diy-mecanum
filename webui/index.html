@@ -295,7 +295,8 @@ async function postMotion(path,payload){
 function vec(){
   const L=(window.S_&&S_.motion&&S_.motion.limits)||{vx:.15,vy:.10,wz:.60};
   const k=scale;
-  let vx=(held.f?1:0)-(held.b?1:0), vy=(held.r?1:0)-(held.l?1:0), wz=(held.yr?1:0)-(held.yl?1:0);
+  // REP-103：y 向左為正、z 逆時針為正（wz>0=車頭往左 已於 2026-11-08 影像實證；vy 符號待實測確認）
+  let vx=(held.f?1:0)-(held.b?1:0), vy=(held.l?1:0)-(held.r?1:0), wz=(held.yl?1:0)-(held.yr?1:0);
   return {vx:vx*L.vx*k, vy:vy*L.vy*k, wz:wz*L.wz*k};
 }
 async function beat(){ await postMotion('beat', vec()); }

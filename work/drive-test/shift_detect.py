@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """用相機影像的相位相關（phase correlation）客觀判定實際運動方向。
 
+⚠️ **符號已用已知位移的合成圖校準過**（見檔尾 selftest，改這個檔案後請重跑 selftest）：
+  `shift()` 回報的 dx **正值 = 場景對畫面往【左】移**，負值 = 往【右】移（與 np.roll 方向相反）
 前視相機的幾何關係：
-  場景在畫面「向左移」(dx<0)  ⇒  車往【右】平移，或車頭往【右】偏航
-  場景在畫面「向右移」(dx>0)  ⇒  車往【左】平移，或車頭往【左】偏航
+  場景往【左】移 (dx>0)  ⇒  車體往【右】平移，或車頭往【右】偏航
+  場景往【右】移 (dx<0)  ⇒  車體往【左】平移，或車頭往【左】偏航
 ⚠️ 平移與偏航都會造成水平位移、符號相同，故此腳本只能給「往哪邊」的符號，
    要區分二者需靠場景位移隨深度的變化（近物位移大=平移、遠近一致=偏航）或人眼佐證。
 
@@ -114,9 +116,10 @@ async def main():
     open(f"frames/{tag}_before.jpg", "wb").write(braw)
     open(f"frames/{tag}_after.jpg", "wb").write(araw)
 
-    side = "左" if dx > 0 else "右"
-    print(f"\n  影像位移 dx = {dx:+.1f} px（場景往{side}移 {abs(dx):.0f} px）｜dy = {dy:+.1f} px｜信心 {conf:.3f}")
-    print(f"  ⇒ 判讀：車體/車頭 往【{side}】")
+    scene = "左" if dx > 0 else "右"      # 場景在畫面的移動方向
+    robot = "右" if dx > 0 else "左"      # 車體方向與場景相反
+    print(f"\n  影像位移 dx = {dx:+.1f} px（場景往{scene}移 {abs(dx):.0f} px）｜dy = {dy:+.1f} px｜信心 {conf:.0f}")
+    print(f"  ⇒ 判讀：車體/車頭 往【{robot}】")
     if conf < 8:
         print("  ⚠️ 峰值信心過低：特徵不足或位移過大到去相關，此結果不可信")
     if abs(dx) < 4 and abs(dy) < 4:
@@ -124,5 +127,20 @@ async def main():
     print(f"  影格: frames/{tag}_before.jpg  frames/{tag}_after.jpg")
 
 
+def selftest():
+    """以已知位移校準 dx/dy 符號；若這個測試不過，所有判讀都不可信。"""
+    base = np.random.default_rng(7).random((240, 320)) * 255
+    ok = True
+    for n, want in ((20, "右"), (-20, "左")):
+        dx, _, _ = shift(base, np.roll(base, n, axis=1))
+        got = "右" if dx < 0 else "左"          # 本檔的符號約定向：dx<0 = 場景往右
+        flag = "OK" if got == want else "❌ 符號跑了"
+        ok &= got == want
+        print(f"  [selftest] 真值往{want}移 {abs(n)} px → dx={dx:+.1f} → 判讀往{got}  {flag}")
+    return ok
+
+
 if __name__ == "__main__":
+    if not selftest():
+        raise SystemExit("❌ 符號自檢失敗，拒絕輸出判讀結果")
     asyncio.run(main())
