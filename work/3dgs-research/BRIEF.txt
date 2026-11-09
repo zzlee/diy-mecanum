@@ -1,0 +1,21 @@
+[ROLE]: pi-researcher
+[TASK]: 查證「在無 root 的 Ubuntu 22.04 + NVIDIA RTX PRO 6000 Blackwell（compute capability sm_120）+ driver 580.82.09 + 機器上完全沒有 CUDA toolkit（無 nvcc）」的環境下，訓練並展示 3D Gaussian Splatting 的可行方案。
+[CONTEXT]:
+- 目的：把一台巡控車拍的家庭環境影片（640x480、約 70-200 張、COLMAP/pycolmap 4.2.1 已可成功重建，內參已標定並固定）做成 3DGS，在瀏覽器即時預覽，並與實拍照片對照。
+- 已確認：host 上 find / -maxdepth 4 -name nvcc 找不到；/data 有 2.1TB 可寫；pip 可連 pypi（nvidia-cuda-nvcc-cu12 有回 200）；docker 無權限（不能用容器）；只能使用一張 GPU（96GB VRAM）。
+[QUESTIONS]（逐條回答，每條都要附來源 URL）
+1. gsplat 最新版本是否支援 sm_120（Blackwell / RTX PRO 6000）？官方是否有針對 torch 2.6/2.7/2.8 + cu126/cu128/cu129 的預編譯 wheel 可直接 pip 安裝（免去編譯）？
+2. 若一定要編譯：無 root 情況下 (a) 只靠 pip 的 nvidia-cuda-nvcc-cu12 / nvidia-cuda-runtime-cu12 / nvidia-cuda-cccl-cu12 能否成功 build PyTorch CUDA extension？(b) NVIDIA cuda runfile 用 --toolkit --toolkitpath=/data/xxx --silent 是否需要 root？(c) 需要設定哪些環境變數（CUDA_HOME、PATH、TORCH_CUDA_ARCH_LIST=12.0）？
+3. 有哪些「免自訂 CUDA kernel」的純 PyTorch 3DGS 實作（可直接跑在 sm_120）？品質與訓練時間代價如何？
+4. 訓練輸出的 .ply（INRIA 格式）/ .splat 在瀏覽器即時預覽的現成方案：mkkellogg GaussianSplats3D、SuperSplat、gsplat viewer、nerfview — 各自吃什麼格式、是否純前端可離線自架、有無授權限制？
+5. 針對「解析度 640x480、70-200 張、基線只有 0.3-1.0 m、視角集中在同一方向」的單目資料集，3DGS 的預期問題與建議參數（sh degree、densify、iterations、是否需要 COLMAP 密集點雲初始化）。
+[BOUNDARIES & RULES]:
+1. 只做網路調研，本機不安裝任何套件、不編譯、不執行建置。
+2. 優先官方文件 / GitHub release / issue 原文，其次教學部落格；明顯過時（2023 年以前）的資訊請標註。
+3. 不確定的事情要寫「未证实」，不要臆造版本號或指令。
+[EXPECTED_OUTPUT]:
+Markdown 報告寫到 work/3dgs-research/REPORT.md，包含：
+- 【結論】可行 / 不可行 / 有條件可行，以及推薦的第一條安裝路徑（可直接貼上的指令序列）
+- 【各題回答】1-5 逐條，附來源 URL
+- 【風險與備援】若主路徑失敗，第二與第三選擇
+- 【未证实事項】清單

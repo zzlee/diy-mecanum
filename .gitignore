@@ -22,3 +22,6 @@ nohup.out
 # 實拍影片與抽出的影格（含住家畫面 + 體積大，不入庫）
 capture/
 work/drive-test/capture/
+
+# 點雲檢視器的資料（你家房間的幾何，不公開）
+work/drive-test/viewer/data.js

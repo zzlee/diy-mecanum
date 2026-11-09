@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>TurboPi 單目 SfM 點雲檢視器（runA）</title>
+<style>
+  :root { --fg:#e8ecf1; --mut:#8a97a8; --bg:#0d1117; --pan:#161b22; --ac:#4ea1ff; --warn:#ffb454; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:13px/1.5 ui-sans-serif,system-ui,"Noto Sans TC",sans-serif; overflow:hidden; }
+  #c { display:block; width:100vw; height:100vh; cursor:grab; }
+  #c.drag { cursor:grabbing; }
+  .ov { position:fixed; background:rgba(22,27,34,.92); border:1px solid #2b3340; border-radius:10px;
+    padding:10px 12px; backdrop-filter:blur(6px); }
+  #hud { top:12px; left:12px; max-width:330px; }
+  #hud h1 { margin:0 0 6px; font-size:14px; }
+  .k { display:flex; justify-content:space-between; gap:12px; color:var(--mut); }
+  .k b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  #ctl { top:12px; right:12px; width:250px; }
+  #ctl label { display:block; margin:8px 0 2px; color:var(--mut); font-size:12px; }
+  #ctl input[type=range] { width:100%; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  button { flex:1 1 auto; background:#212832; color:var(--fg); border:1px solid #313b49; border-radius:7px;
+    padding:5px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--ac); }
+  button.on { background:#123457; border-color:var(--ac); }
+  #foot { bottom:12px; left:12px; color:var(--mut); font-size:12px; max-width:520px; }
+  #scale { position:fixed; bottom:16px; right:16px; text-align:right; color:var(--mut); font-size:12px; }
+  #bar { height:6px; border:1px solid var(--mut); border-top:none; margin-top:3px; }
+  .tag { color:var(--warn); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="ov" id="hud">
+  <h1>TurboPi 單目 SfM 重建 · runA</h1>
+  <div class="k"><span>註冊影格</span><b id="s_reg"></b></div>
+  <div class="k"><span>平均重投影誤差</span><b id="s_mre"></b></div>
+  <div class="k"><span>尺度錨定（聲納）</span><b id="s_scale"></b></div>
+  <div class="k"><span>顯示點數 / 總點數</span><b id="s_n"></b></div>
+  <div class="k"><span>軌跡長度（實測）</span><b id="s_span"></b></div>
+  <div class="k"><span>色彩</span><b id="s_mode"></b></div>
+</div>
+
+<div class="ov" id="ctl">
+  <label>距離濾波（只看軌跡半徑內）：<b id="l_f"></b></label>
+  <input id="f" type="range" min="0.2" max="2.8" step="0.05" value="1.0">
+  <label>點大小：<b id="l_p"></b></label>
+  <input id="p" type="range" min="1" max="7" step="0.5" value="2.5">
+  <div class="row">
+    <button id="m_depth" class="on">依深度</button>
+    <button id="m_height">依高度</button>
+    <button id="m_one">單色</button>
+  </div>
+  <div class="row">
+    <button id="t_cams" class="on">相機軌跡</button>
+    <button id="t_axis" class="on">座標軸</button>
+    <button id="t_rot">自動轉</button>
+  </div>
+  <div class="row">
+    <button data-v="iso">等角</button><button data-v="top">俯視</button>
+    <button data-v="front">正面</button><button data-v="side">側面</button>
+  </div>
+</div>
+
+<div class="ov" id="foot">
+  拖曳=旋轉 · 滾輪=遠近 · Shift+拖曳=平移 · 雙擊=重置<br>
+  <span class="tag">注意：單目＋無 IMU ⇒ 座標系沒有重力基準，「高度」只是 COLMAP 的 y 軸，不代表水平。</span>
+</div>
+<div id="scale"><span id="s_len"></span><div id="bar"></div></div>
+
+<script src="data.js"></script>
+<script>
+const PC = window.PC, M = PC.meta;
+const cv = document.getElementById('c'), g = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+const st = {
+  yaw: 0.7, pitch: -0.35, dist: 3.2, panX: 0, panY: 0,
+  psize: 2.5, filter: 1.0, mode: 'depth', cams: true, axis: true, rot: false,
+};
+const HOME = { yaw: st.yaw, pitch: st.pitch, dist: st.dist, panX: 0, panY: 0 };
+const VIEWS = {
+  iso:   { yaw: 0.7,  pitch: -0.35 },
+  top:   { yaw: 0.0,  pitch: -1.52 },
+  front: { yaw: 0.0,  pitch: 0.0 },
+  side:  { yaw: 1.57, pitch: 0.0 },
+};
+
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  W = cv.clientWidth = window.innerWidth; H = cv.clientHeight = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  draw();
+}
+addEventListener('resize', resize);
+
+// 點雲：依濾波条件篩掉飛點（COLMAP 單目常見的遠端雜訊）
+let shown = [];
+function rebuild() {
+  shown = [];
+  for (let i = 0; i < PC.pts.length; i++) {
+    if (PC.dmin[i] <= st.filter) shown.push({ p: PC.pts[i], i });
+  }
+  document.getElementById('s_n').textContent = `${shown.length} / ${M.points}`;
+  document.getElementById('l_f').textContent = st.filter.toFixed(2) + ' m';
+  document.getElementById('l_p').textContent = st.psize.toFixed(1) + ' px';
+}
+
+function rot(p) {
+  const cy = Math.cos(st.yaw), sy = Math.sin(st.yaw);
+  const cp = Math.cos(st.pitch), sp = Math.sin(st.pitch);
+  let x = p[0] * cy + p[2] * sy, z = -p[0] * sy + p[2] * cy, y = p[1];
+  const y2 = y * cp - z * sp; z = y * sp + z * cp;
+  return [x, y2, z];
+}
+const F = 1.15;                                  // 透視強度（焦距/場景尺寸比）
+function proj(p) {
+  const r = rot(p), d = Math.max(0.05, st.dist + r[2]);
+  const s = (F * Math.min(W, H)) / d;
+  return [W / 2 + st.panX + r[0] * s, H / 2 + st.panY - r[1] * s, d, s];
+}
+function col(i, p) {
+  if (st.mode === 'one') return 'rgba(200,215,235,.92)';
+  if (st.mode === 'height') {
+    const lo = -0.7, t = Math.max(0, Math.min(1, (p[1] - lo) / 1.4));
+    return `hsl(${(215 - 190 * t).toFixed(0)},72%,${(42 + 20 * t).toFixed(0)}%)`;
+  }
+  const t = Math.max(0, Math.min(1, PC.dmin[i] / Math.max(0.15, st.filter)));
+  return `hsl(${(6 + 196 * t).toFixed(0)},75%,${(60 - 14 * t).toFixed(0)}%)`;
+}
+
+function draw() {
+  g.fillStyle = '#0d1117'; g.fillRect(0, 0, W, H);
+  if (st.axis) {
+    const A = [[1,0,0],[0,1,0],[0,0,1]], L = 1.0, nm = ['X','Y','Z'];
+    A.forEach((v, k) => {
+      const a = proj([0,0,0]), b = proj([v[0]*L, v[1]*L, v[2]*L]);
+      g.strokeStyle = ['#ff6b6b','#7ee787','#79c0ff'][k]; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+      g.fillStyle = g.strokeStyle; g.font = '12px ui-sans-serif'; g.fillText(nm[k], b[0] + 4, b[1]);
+    });
+  }
+  const pr = shown.map(o => proj(o.p));                       // 每格只投影一次
+  const order = pr.map((_, k) => k);
+  order.sort((a, b) => pr[b][2] - pr[a][2]);                    // 遠的先畫
+  const k0 = F * Math.min(W, H);
+  for (const k of order) {
+    const o = shown[k], x = pr[k][0], y = pr[k][1], s = pr[k][3];
+    const r = Math.max(0.7, st.psize * (s / k0) * 3.2);
+    g.fillStyle = col(o.i, o.p);
+    g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
+  }
+  if (st.cams && PC.cams.length) {
+    g.strokeStyle = 'rgba(255,180,84,.95)'; g.lineWidth = 2; g.beginPath();
+    PC.cams.forEach((c, i) => { const q = proj(c); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+    g.stroke();
+    PC.cams.forEach((c, i) => {
+      const q = proj(c), s = q[3];
+      g.fillStyle = i === 0 ? '#7ee787' : (i === PC.cams.length - 1 ? '#ff6b6b' : '#ffb454');
+      g.beginPath(); g.arc(q[0], q[1], Math.max(2, s * 0.007), 0, 6.283); g.fill();
+    });
+    g.font = '12px ui-sans-serif'; g.fillStyle = '#7ee787';
+    let a = proj(PC.cams[0]); g.fillText('起點 f_006', a[0] + 8, a[1] - 6);
+    g.fillStyle = '#ff6b6b'; a = proj(PC.cams[PC.cams.length - 1]); g.fillText('終點', a[0] + 8, a[1] - 6);
+  }
+  // 1 公尺比例尺（用場景中心的透視尺度）
+  const s0 = (F * Math.min(W, H)) / st.dist;
+  document.getElementById('bar').style.width = s0 + 'px';
+  document.getElementById('s_len').textContent = '1 m';
+}
+
+function tick() {
+  if (st.rot) { st.yaw += 0.004; draw(); }
+  requestAnimationFrame(tick);
+}
+
+let drag = null;
+cv.addEventListener('mousedown', e => { drag = { x: e.clientX, y: e.clientY, sh: e.shiftKey }; cv.classList.add('drag'); });
+addEventListener('mousemove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (drag.sh) { st.panX += dx; st.panY += dy; } else { st.yaw += dx * 0.008; st.pitch = Math.max(-1.55, Math.min(1.55, st.pitch + dy * 0.008)); }
+  drag = { x: e.clientX, y: e.clientY, sh: drag.sh }; draw();
+});
+addEventListener('mouseup', () => { drag = null; cv.classList.remove('drag'); });
+cv.addEventListener('wheel', e => { e.preventDefault(); st.dist = Math.max(0.6, Math.min(12, st.dist * (e.deltaY > 0 ? 1.12 : 0.89))); draw(); }, { passive:false });
+cv.addEventListener('dblclick', () => Object.assign(st, HOME), draw());
+addEventListener('keydown', e => { const v = VIEWS[e.key]; if (v) { st.yaw = v.yaw; st.pitch = v.pitch; draw(); } });
+
+const bind = (id, key, parse, after) => document.getElementById(id).addEventListener('input', e => {
+  st[key] = parse(e.target.value); (after || rebuild)(); draw();
+});
+bind('f', 'filter', parseFloat); bind('p', 'psize', parseFloat);
+const tog = (id, key, label) => {
+  const b = document.getElementById(id);
+  b.onclick = () => { st[key] = !st[key]; b.classList.toggle('on', st[key]); draw(); };
+};
+tog('t_cams', 'cams'); tog('t_axis', 'axis'); tog('t_rot', 'rot');
+['depth','height','one'].forEach(m => document.getElementById('m_' + m).onclick = () => {
+  st.mode = m; document.getElementById('s_mode').textContent = {depth:'離軌跡最近距離（紅近藍遠）', height:'沿 y 軸（≠水平）', one:'單色'}[m];
+  ['depth','height','one'].forEach(x => document.getElementById('m_' + x).classList.toggle('on', x === m));
+  draw();
+});
+document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { st.yaw = VIEWS[b.dataset.v].yaw; st.pitch = VIEWS[b.dataset.v].pitch; draw(); });
+
+document.getElementById('s_reg').textContent = `${M.registered} / ${M.images}（固定內參）`;
+document.getElementById('s_mre').textContent = M.mre.toFixed(3) + ' px';
+document.getElementById('s_scale').textContent = `1 單位 = ${M.mm_per_unit} mm（位移 ${M.measured_travel_mm} mm ÷ ${M.span_units}）`;
+document.getElementById('s_span').textContent = (M.measured_travel_mm / 1000).toFixed(3) + ' m';
+document.getElementById('s_mode').textContent = '離軌跡最近距離（紅近藍遠）';
+rebuild(); resize(); tick();
+</script>
+</body>
+</html>

@@ -66,25 +66,25 @@
 #### 連接埠轉發對照 (Port Forwarding)
 | 本機端點 | 遠端端點 | 服務 / API | 備註 |
 | :--- | :--- | :--- | :--- |
-| `127.0.0.1:8000` | `:8080` | Strata OpenAI 相容 API（`/v1/chat/completions`） | `pi --provider ttu-vllm` 使用此介面；遠端埠以 `API_PORT_REMOTE=8080` 指定 |
+| `127.0.0.1:8080` | `:8080` | Strata OpenAI 相容 API（`/v1/chat/completions`） | **實測現況（2026-11-09 校正）**：本機與遠端**同用 8080**，`~/.pi/agent/models.json` 的 `ttu-vllm.baseUrl = http://127.0.0.1:8080/v1`；健康檢查改 `curl -s http://127.0.0.1:8080/v1/models`。（舊檔寫的本機 8000 已不再使用，照舊檔 curl 會得到 HTTP=000 而誤判成「隧道斷了」） |
 | `127.0.0.1:11435` | `:11434` | Ollama 相容 API（`/api/chat`，vllm-shim） | **本機 11434 保留給本機 ollama**；strata 不提供 `/api/chat`，此埠目前無效 |
 
 #### 隧道生命週期管理
 ```bash
-API_PORT_REMOTE=8080 pi-tunnel -f    # 背景常駐（派工前的標準啟動方式；strata 在遠端 8080）
+pi-tunnel -f                        # 背景常駐（預設 8080→8080）（派工前的標準啟動方式；strata 在遠端 8080）
 pi-tunnel                            # 前景執行，Ctrl-C 結束（除錯/看 log 用）
 ```
-> ⚠️ 若忘記帶 `API_PORT_REMOTE=8080`，隧道會轉到遠端 8000（沒人聽）→ `curl` 永遠空白，且**埠看起來是通的**，容易誤判成模型沒起。
+> ⚠️ **2026-11-09 校正**：`~/.local/bin/pi-tunnel` 的預設已改成 `API_PORT=8080`（`API_PORT_REMOTE` 預設跟隨它），所以**直接 `pi-tunnel -f` 就是對的**，不再需要手動帶 `API_PORT_REMOTE=8080`。舊文件叫你一定要帶，會讓人以為沒帶就轉到遠端 8000。
 
 **選用的環境變數覆寫**（腳本內皆有預設值，一般不需指定）：
 
 | 變數 | 預設值 | 用途 |
 | :--- | :--- | :--- |
 | `REMOTE` | `<GPU_HOST_USER>@<GPU_HOST>` | 換 GPU 節點 |
-| `API_PORT` | `8000` | **本機** API 埠 |
-| `API_PORT_REMOTE` | 同 `API_PORT` | **遠端** API 埠（strata 固定 8080 時必設） |
+| `API_PORT` | `8080` | **本機** API 埠（2026-11-09 起預設即 8080） |
+| `API_PORT_REMOTE` | 同 `API_PORT` | **遠端** API 埠（預設跟隨本機埠，兩邊都是 8080 ⇒ 不必設） |
 | `OLLAMA_LOCAL` / `OLLAMA_REMOTE` | `11435` / `11434` | Ollama shim 埠對 |
-| `ONLY` | `both` | `openai`（只開 8000）或 `ollama`（只開 11435） |
+| `ONLY` | `both` | `openai`（只開 8080）或 `ollama`（只開 11435） |
 
 **腳本內建保護機制**（無須額外操心，但須知其行為）：
 1. 啟動前以 `ss -lnt` 檢查目標埠是否已佔用，已佔用即中止並提示「隧道可能已在跑」，**不會重複疊加第二條隧道**。
@@ -94,21 +94,21 @@ pi-tunnel                            # 前景執行，Ctrl-C 結束（除錯/看
 #### 健康狀態檢查與故障排除
 ```bash
 # 1) 通道健康檢查（派工前必要步驟，回傳 qwen3.8-flash-next-nvfp4-nvfp4 即正常）
-curl -s http://127.0.0.1:8000/v1/models
+curl -s http://127.0.0.1:8080/v1/models
 
 # 2) 確認隧道行程與監聽埠
-grep -q ":8000 " <<<"$(ss -lnt)" && echo "port 8000 OK"
+grep -q ":8080 " <<<"$(ss -lnt)" && echo "port 8080 OK"
 pgrep -af "ssh -N.*<GPU_HOST>"
 
 # 3) 中斷/重啟隧道（改埠或換節點時使用；pkill 用 ; 而非 &&，未啟動時也能直接拉起）
-pkill -f "ssh -N.*<GPU_HOST>"; sleep 1; API_PORT_REMOTE=8080 pi-tunnel -f
+pkill -f "ssh -N.*<GPU_HOST>"; sleep 1; pi-tunnel -f
 ```
 * **檢查失敗排查順序**：本機無監聽埠 → 未啟動或已斷線，重跑 `API_PORT_REMOTE=8080 pi-tunnel -f`；埠在聽但 `curl` 無回應 → 先確認遠端真的在 8080（`ssh <GPU_HOST_USER>@<GPU_HOST> 'ss -lnt | grep 8080'`），再請人類至遠端啟動 `~/qwen3_8_flash_next_dev/serve-strata.sh`（協調者不得自行長等遠端服務重啟）。
 * **模型 ID 為何有兩個 `nvfp4`**：遠端啟動參數是 `--model nvfp4 --family nvfp4`（`serve-strata.sh` 第 50–51 行），而模型本身名稱已含 `NVFP4`，strata 會把量化標籤接在家族名後面，於是變成 `qwen3.8-flash-next-nvfp4-nvfp4`。**此 ID 由伺服器決定，client 端必須照抄**；要消除重複字樣只能改遠端 `MODEL`/`FAMILY` 變數，改本機設定無效。
 
 #### Provider 設定檔來源（`~/.pi/agent/models.json`）
 `pi` 的 `ttu-vllm` provider 由本機設定檔定義，派工指令不需重複指定 baseUrl：
-* `baseUrl`: `http://127.0.0.1:8000/v1`，`api`: `openai-completions`，`apiKey`: `none`
+* `baseUrl`: `http://127.0.0.1:8080/v1`，`api`: `openai-completions`，`apiKey`: `none`
 * Model `qwen3.8-flash-next-nvfp4-nvfp4`：`contextWindow` 262144、`maxTokens` 65536、`reasoning: true`、`input: ["text","image"]`（**2026-11-08 起帶 `--vision` 上線**；此前 strata 自報純文字）、`thinkingFormat: qwen-chat-template`
 
 > **協調者授權例外**：§1.1 紅線禁止協調者親自執行建置/編譯，但 **`pi-tunnel -f` 與上述健康檢查指令為唯一獲准由協調者直接執行的環境維運操作**（僅建立通道、不觸發編譯，不產生巨量 Log）。
@@ -129,7 +129,7 @@ cd <TARGET_PROJECT_PATH> && pi \
 ```
 
 > **參數說明**：
-> - `--provider ttu-vllm`：強制使用本地 OpenAI 相容端點 (`http://127.0.0.1:8000/v1`，隧道轉發至遠端 strata `:8080`)。
+> - `--provider ttu-vllm`：強制使用本地 OpenAI 相容端點 (`http://127.0.0.1:8080/v1`，隧道轉發至遠端 strata `:8080`)。
 > - `--model qwen3.8-flash-next-nvfp4-nvfp4`：strata 回報的完整模型 ID（**不是** `qwen3.8-flash-nvfp4`；舊 ID 會 404）。
 > - `--thinking high`：啟動深度思考鏈，確保 C/C++ 語法與 Makefile 邏輯分析嚴謹。
 > - `-p`：非互動批次模式，完成任務後退出並回傳結果。
@@ -194,7 +194,7 @@ cd <TARGET_PROJECT_PATH> && pi \
 
 在呼叫 `pi + qwen` 前，請自我檢查：
 - [ ] 目標路徑是否為真實專案路徑？
-- [ ] LLM 通道是否已建立且健康 — 先 `curl -s http://127.0.0.1:8000/v1/models`；若無回應則 `API_PORT_REMOTE=8080 pi-tunnel -f` 重建後再驗一次（見 §1.4）。
+- [ ] LLM 通道是否已建立且健康 — 先 `curl -s http://127.0.0.1:8080/v1/models`；若無回應則 `API_PORT_REMOTE=8080 pi-tunnel -f` 重建後再驗一次（見 §1.4）。
 - [ ] 建置指令是否包含必要的 Docker 包裝腳本（如 `./scripts/docker-run.sh`）或環境變數？
 - [ ] 是否給予了明確的自癒修復目標，而不是含糊的「請幫我看看」？
 - [ ] 是否要求地端 Agent 提供結構化的結果彙報以節省 Coordinator 的理解成本？
