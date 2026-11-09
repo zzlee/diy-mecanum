@@ -25,3 +25,7 @@ work/drive-test/capture/
 
 # 點雲檢視器的資料（你家房間的幾何，不公開）
 work/drive-test/viewer/data.js
+
+# 檢視器的本地資料（房間幾何 + 實拍縮圖，含住家資訊，不入庫）
+work/drive-test/viewer/thumbs/
+work/drive-test/viewer/viewer_export.json
