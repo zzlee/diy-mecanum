@@ -1,0 +1,26 @@
+[Unit]
+Description=TurboPi phone remote-control web server (runs inside the TurboPi container)
+Documentation=file:/home/pi/docker_ros2/tmp/phonerc/app.py
+After=docker.service start_node.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# 啟動前先清掉容器內的殘留程序：docker exec 被殺時容器內程序不會跟著死，實測會留孤兒佔住 8090
+ExecStartPre=/usr/bin/docker exec TurboPi /bin/sh /home/ubuntu/share/tmp/phonerc/cleanup.sh
+# 等 ROS bringup 把節點起起來再啟動（本服務對尚未就緒的主題是容忍的，這裡只是讓狀態一開始就是完整的）
+ExecStartPre=/bin/sleep 40
+ExecStart=/usr/bin/docker exec -u ubuntu -w /home/ubuntu/share/tmp/phonerc TurboPi /bin/zsh -c \
+  "source /opt/ros/humble/setup.zsh && source /home/ubuntu/ros2_ws/install/setup.zsh && exec python3 /home/ubuntu/share/tmp/phonerc/app.py"
+# ⚠️ 重要：docker exec 被殺掉時，容器內的 python3 **不一定會跟著死**（實測會留孤兒佔著 8090，
+#     結果 systemd 顯示 active 但跑的是舊程式）。所以停止後務必在容器內補殺一次。
+# 清理走獨立殼檔：指令列不含被比對字串，避免 pkill 殺掉自己
+ExecStopPost=/usr/bin/docker exec TurboPi /bin/sh /home/ubuntu/share/tmp/phonerc/cleanup.sh
+Restart=on-failure
+RestartSec=5
+# 不给 root 權限之外的東西；只是 docker exec
+TimeoutStopSec=20
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
