@@ -279,6 +279,18 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if p == "/api/state":
             return self._send(200, self.state_json())
+        if p == "/api/limits":                   # 只回報夾限結果，**不下發任何速度**（安全測試用）
+            q = self.path.split("?")[1] if "?" in self.path else ""
+            kv = dict(x.split("=", 1) for x in q.split("&") if "=" in x)
+            try:
+                out = {k: clamp(k, kv.get(k, 0.0)) for k in ("vx", "vy", "wz")}
+            except Exception:
+                return self._send(400, {"error": "數值不合法"})
+            if not STRAFE_ENABLED:
+                out["vy"] = 0.0
+            return self._send(200, {"applied": False, "clamped": out,
+                                    "duty": {k: round(abs(v) * (DUTY["angular"] if k == "wz" else DUTY["linear"]), 1)
+                                             for k, v in out.items()}})
         if p == "/api/photos":
             try:
                 fs = sorted(os.listdir(PHOTO_DIR), reverse=True)
@@ -403,70 +415,63 @@ PAGE = """<!doctype html><html lang="zh-Hant"><head>
 <style>
 :root{--bg:#0b0e14;--card:#141a24;--fg:#dfe6f2;--dim:#8a97ab;--ok:#3ddc84;--bad:#ff5c5c}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,"Noto Sans TC",sans-serif;padding:10px}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,"Noto Sans TC",sans-serif;padding:10px;overscroll-behavior:none}
 h1{font-size:16px;margin:2px 0 8px}
-.view{width:100%;max-width:460px;margin:0 auto;aspect-ratio:4/3;background:#000;border-radius:10px;overflow:hidden}
-.view img{width:100%;height:100%;object-fit:contain;display:block}
+.stage{position:relative;width:100%;max-width:460px;margin:0 auto;aspect-ratio:4/3;background:#000;border-radius:12px;overflow:hidden}
+.stage img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+#pad{position:absolute;inset:0;touch-action:none;user-select:none;cursor:crosshair;background:
+  radial-gradient(circle at 50% 50%, rgba(255,255,255,.06), transparent 62%)}
+#pad.act{background:radial-gradient(circle at 50% 50%, rgba(61,220,132,.16), transparent 62%)}
+#ind{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.hint{position:absolute;left:0;right:0;bottom:8px;text-align:center;font-size:12px;color:#cfd8e6;
+  text-shadow:0 1px 3px #000;pointer-events:none}
 .bar{display:flex;gap:6px;flex-wrap:wrap;margin:8px auto;font-size:12px;color:var(--dim);max-width:460px}
 .chip{background:var(--card);border-radius:20px;padding:3px 9px}
 .st{font-weight:700}.on{color:var(--ok)}.off{color:var(--dim)}.bad{color:var(--bad)}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:460px;margin:0 auto}
-button{border:0;border-radius:12px;padding:18px 6px;font-size:16px;color:var(--fg);background:var(--card);
- user-select:none;touch-action:manipulation}
-button:active{filter:brightness(1.6)}
-.big{font-size:22px}.stop{background:#243040;font-weight:800}
-.danger{background:#3a1518;color:#ffb3b3;font-weight:800}
-.photo{background:#1d2f22;color:#b8f0c8;font-weight:800;padding:20px}
 .sv{width:100%;max-width:460px;margin:6px auto;background:var(--card);border-radius:12px;padding:10px;font-size:13px}
 input[type=range]{width:100%}
 .note{font-size:11px;color:var(--dim);margin:6px auto;max-width:460px}
 .err{color:var(--bad);font-size:12px;min-height:16px;max-width:460px;margin:4px auto}
 .row{display:flex;gap:8px;max-width:460px;margin:8px auto}
+button{border:0;border-radius:12px;padding:16px 8px;font-size:16px;color:var(--fg);background:var(--card);
+ flex:1;user-select:none;touch-action:manipulation}
+button:active{filter:brightness(1.6)}
+.danger{background:#3a1518;color:#ffb3b3;font-weight:800}
+.photo{background:#1d2f22;color:#b8f0c8;font-weight:800;padding:18px}
 </style></head><body>
-<h1>TurboPi 遙控 <span style="color:var(--dim);font-size:11px">按住才動・放開即停（護欄在車上）</span></h1>
-<div class="view"><img id="v" alt="載入中…"></div>
+<h1>TurboPi <span style="color:var(--dim);font-size:11px">在畫面上拖曳＝前進/轉向・輕按一下＝停止</span></h1>
+<div class="stage">
+  <img id="v" alt="載入中…">
+  <svg id="ind"><circle id="c0" r="6" fill="rgba(255,255,255,.35)"></circle>
+    <line id="ln" stroke="#3ddc84" stroke-width="4" stroke-linecap="round" opacity="0"></line>
+    <circle id="c1" r="12" fill="none" stroke="#3ddc84" stroke-width="3" opacity="0"></circle></svg>
+  <div id="pad"></div>
+  <div class="hint" id="hint">按住並拖曳（上=前，下=後，左右=旋轉）；輕按＝停止</div>
+</div>
 <div class="bar">
  <span class="chip">狀態 <b id="st" class="st off">待命</b></span>
+ <span class="chip">vx <b id="vxv">0.00</b></span>
+ <span class="chip">wz <b id="wzv">0.00</b></span>
+ <span class="chip">duty <b id="duty">0/0</b>%</span>
  <span class="chip">心跳 <b id="age">-</b>ms</span>
  <span class="chip">超音波 <b id="son">-</b>mm</span>
  <span class="chip">電池 <b id="bat">-</b>mV</span>
- <span class="chip">duty <b id="duty">0/0</b>%</span>
  <span class="chip">pan <b id="panv">-</b></span>
  <span class="chip">照片 <b id="np">0</b></span>
 </div>
-<div class="grid">
- <button style="visibility:hidden"></button><button data-k="f" class="big">▲</button><button style="visibility:hidden"></button>
- <button data-k="rotl">↺ 左轉</button><button data-k="stop" class="stop">■</button><button data-k="rotr">右轉 ↻</button>
- <button style="visibility:hidden"></button><button data-k="b" class="big">▼</button><button style="visibility:hidden"></button>
-</div>
-<div class="note">🔴 <b>側移已停用</b>（實測純 linear.y 會讓車自轉）。用「前後＋旋轉」。鍵盤：↑↓ 前後、Q/E 旋轉。</div>
+<div class="note">🔴 <b>側移已停用</b>（實測純 linear.y 會讓車自轉）⇒ 斜拖＝「前後＋旋轉」合成。桌面可用 ↑↓ 前後、Q/E 旋轉。</div>
 <div class="sv">pan（µs 越大＝鏡頭往左）<input id="pan" type="range" min="1100" max="1900" value="1500"></div>
 <div class="sv">tilt <input id="tilt" type="range" min="1100" max="1900" value="1500"></div>
-<div class="row"><button class="photo" id="shot" style="flex:1">📷 拍照</button></div>
-<div class="row"><button class="danger" id="estop" style="flex:1">🛑 急停</button>
- <button id="clr" style="flex:1;display:none">解除急停</button></div>
+<div class="row"><button class="photo" id="shot">📷 拍照</button></div>
+<div class="row"><button class="danger" id="estop">🛑 急停</button><button id="clr" style="display:none">解除急停</button></div>
 <div id="shotbox" style="max-width:460px;margin:8px auto"></div>
 <div class="err" id="err"></div>
 <div class="note"><a href="/api/photos" style="color:#7fb2ff">照片清單</a>｜<span id="vid"></span></div>
 <script>
-let estopped=false, held={}, beatTimer=null;
 const $=id=>document.getElementById(id);
-const AXES={f:[1,0],b:[-1,0],rotl:[0,1],rotr:[0,-1]};   // rotl=左轉=wz>0（REP-103 實測）
-document.querySelectorAll('button[data-k]').forEach(b=>{
-  const k=b.dataset.k;
-  if(k==='stop'){ b.onclick=e=>{e.preventDefault(); post('/api/stop',{});}; return; }
-  const dn=e=>{e.preventDefault(); held[k]=1; startBeat();};
-  const up=e=>{e&&e.preventDefault(); delete held[k]; if(!Object.keys(held).length) stopBeat();};
-  b.addEventListener('pointerdown',dn); b.addEventListener('pointerup',up);
-  b.addEventListener('pointercancel',up); b.addEventListener('pointerleave',up); b.addEventListener('contextmenu',e=>e.preventDefault());
-});
-const KEY={ArrowUp:'f',ArrowDown:'b',w:'f',s:'b',q:'rotl',e:'rotr'};
-addEventListener('keydown',e=>{const k=KEY[e.key]; if(k&&!e.repeat){held[k]=1; startBeat();}});
-addEventListener('keyup',e=>{const k=KEY[e.key]; if(k){delete held[k]; if(!Object.keys(held).length) stopBeat();}});
-addEventListener('blur',()=>{held={}; stopBeat();});
-document.addEventListener('visibilitychange',()=>{if(document.hidden){held={}; stopBeat();}});
-function startBeat(){ if(beatTimer) return; beat(); beatTimer=setInterval(beat,220); }
-function stopBeat(){ if(beatTimer){clearInterval(beatTimer); beatTimer=null;} beat(); }
+const LIM={vx:0.25, wz:1.60}, DEAD=18, RMAX=110;   // px：死區與滿速半徑
+let estopped=false, beatTimer=null, sending={vx:0,wz:0};
+
 async function post(p,o={}){
   const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});
   const t=r.headers.get('content-type')||'';
@@ -474,25 +479,77 @@ async function post(p,o={}){
   if(!r.ok) throw new Error((d&&d.error)||('HTTP '+r.status));
   return {status:r.status,data:d,headers:r.headers};
 }
-function vec(){
-  let vx=0,wz=0;
-  for(const k in held){const a=AXES[k]; if(a){vx+=a[0]; wz+=a[1];}}
-  vx=Math.max(-1,Math.min(1,vx)); wz=Math.max(-2,Math.min(2,wz));
-  return {vx:vx*0.25, wz:wz*1.60};
-}
-async function beat(){
+async function send(v){
+  sending=v;
+  $('vxv').textContent=v.vx.toFixed(2); $('wzv').textContent=v.wz.toFixed(2);
   if(estopped) return;
-  try{ await post('/api/beat', vec()); $('err').textContent=''; }
-  catch(e){ $('err').textContent=e.message; }
+  try{ await post('/api/beat', v); $('err').textContent=''; }catch(e){ $('err').textContent=e.message; }
 }
-$('estop').onclick=async()=>{ try{ await post('/api/estop',{}); held={}; stopBeat(); }catch(e){$('err').textContent=e.message;} };
+function startLoop(){ if(beatTimer) return; beatTimer=setInterval(()=>send(curVec()),220); }
+function stopLoop(finalZero){
+  if(beatTimer){clearInterval(beatTimer); beatTimer=null;}
+  if(finalZero) send({vx:0,wz:0});
+}
+// ---- 拖曳控制層 ----
+const pad=$('pad'), ind=$('ind'), ln=$('ln'), c1=$('c1'), c0=$('c0');
+let drag=null;   // {x0,y0,x,y}
+function fit(){ const r=pad.getBoundingClientRect(); ind.setAttribute('viewBox',`0 0 ${r.width} ${r.height}`);
+  c0.setAttribute('cx',r.width/2); c0.setAttribute('cy',r.height/2); }
+addEventListener('resize',fit); fit();
+function curVec(){
+  if(!drag) return {vx:0,wz:0};
+  const dx=drag.x-drag.x0, dy=drag.y-drag.y0, len=Math.hypot(dx,dy);
+  if(len<DEAD) return {vx:0,wz:0};
+  const k=Math.min(1,(len-DEAD)/(RMAX-DEAD));
+  const ux=dx/len, uy=dy/len;
+  return {vx:(-uy)*k*LIM.vx, wz:(-ux)*k*LIM.wz};   // 上拖 dy<0 ⇒ vx>0；右拖 ux>0 ⇒ wz<0（wz>0=左，已實測）
+}
+function draw(){
+  const r=pad.getBoundingClientRect(), cx=r.width/2, cy=r.height/2;
+  if(!drag){ ln.setAttribute('opacity',0); c1.setAttribute('opacity',0); return; }
+  const k=Math.min(1,Math.hypot(drag.x-drag.x0,drag.y-drag.y0)/RMAX);
+  const ex=cx+(drag.x-drag.x0)*0.9, ey=cy+(drag.y-drag.y0)*0.9;
+  ln.setAttribute('x1',cx); ln.setAttribute('y1',cy); ln.setAttribute('x2',ex); ln.setAttribute('y2',ey);
+  c1.setAttribute('cx',ex); c1.setAttribute('cy',ey);
+  const col=k<0.15?'#8a97ab':(k<0.6?'#e8b84b':'#3ddc84');
+  ln.setAttribute('stroke',col); c1.setAttribute('stroke',col);
+  ln.setAttribute('opacity',1); c1.setAttribute('opacity',1);
+}
+function begin(e){
+  if(estopped){ $('err').textContent='已急停，先按『解除急停』'; return; }
+  const r=pad.getBoundingClientRect();
+  drag={x0:e.clientX-r.left, y0:e.clientY-r.top, x:e.clientX-r.left, y:e.clientY-r.top, t:Date.now(), id:e.pointerId};
+  pad.setPointerCapture&&pad.setPointerCapture(e.pointerId);
+  pad.classList.add('act'); $('hint').style.opacity=.25; startLoop(); draw();
+  send(curVec());
+}
+function move(e){ if(!drag||e.pointerId!==drag.id) return; const r=pad.getBoundingClientRect();
+  drag.x=e.clientX-r.left; drag.y=e.clientY-r.top; draw(); }
+function end(e){
+  if(!drag||(e&&e.pointerId!==drag.id)) return;
+  const moved=Math.hypot(drag.x-drag.x0, drag.y-drag.y0), dur=Date.now()-drag.t;
+  drag=null; pad.classList.remove('act'); $('hint').style.opacity=1;
+  stopLoop(true); draw();
+  if(moved<DEAD && dur<400){ post('/api/stop',{}).catch(()=>{}); $('err').textContent=''; }   // 輕按＝停止
+}
+pad.addEventListener('pointerdown',e=>{e.preventDefault(); begin(e);});
+pad.addEventListener('pointermove',e=>{e.preventDefault(); move(e);});
+pad.addEventListener('pointerup',e=>{e.preventDefault(); end(e);});
+pad.addEventListener('pointercancel',e=>end(e));
+addEventListener('blur',()=>end());
+document.addEventListener('visibilitychange',()=>{ if(document.hidden){ drag=null; pad.classList.remove('act'); stopLoop(true);} });
+const KEY={ArrowUp:[1,0],ArrowDown:[-1,0],w:[1,0],s:[-1,0],q:[0,1],e:[0,-1]};
+let keys={};
+addEventListener('keydown',ev=>{ const k=KEY[ev.key]; if(k&&!ev.repeat){ keys[ev.key]=k; startLoop(); send(kbd()); } });
+addEventListener('keyup',ev=>{ if(KEY[ev.key]){ delete keys[ev.key]; if(!Object.keys(keys).length) stopLoop(true); } });
+function kbd(){ let vx=0,wz=0; for(const k in keys){ vx+=keys[k][0]; wz+=keys[k][1]; }
+  return {vx:Math.max(-1,Math.min(1,vx))*LIM.vx, wz:Math.max(-2,Math.min(2,wz))*LIM.wz}; }
+// ---- 其餘控制 ----
+$('estop').onclick=async()=>{ try{ await post('/api/estop',{}); drag=null; stopLoop(true);}catch(e){$('err').textContent=e.message;} };
 $('clr').onclick=async()=>{ try{ await post('/api/clear_estop',{}); $('err').textContent=''; }catch(e){$('err').textContent=e.message;} };
 $('shot').onclick=async()=>{
-  try{
-    const r=await post('/api/photo',{});
-    const url=URL.createObjectURL(r.data), name=r.headers.get('X-Saved-As')||'photo.jpg';
-    if($('shotbox').dataset.prev) URL.revokeObjectURL($('shotbox').dataset.prev);
-    $('shotbox').dataset.prev=url;
+  try{ const r=await post('/api/photo',{}); const url=URL.createObjectURL(r.data), name=r.headers.get('X-Saved-As')||'photo.jpg';
+    if($('shotbox').dataset.prev) URL.revokeObjectURL($('shotbox').dataset.prev); $('shotbox').dataset.prev=url;
     $('shotbox').innerHTML=`<img src="${url}" style="width:100%;border-radius:10px">
       <div class="note">已存於車上 <b>${name}</b>｜<a href="${url}" download="${name}" style="color:#7fb2ff">下載到手機</a></div>`;
   }catch(e){ $('err').textContent=e.message; }
@@ -504,17 +561,13 @@ $('v').src=location.protocol+'//'+location.hostname+':8080/stream?topic=/image_r
 setInterval(async()=>{
   try{
     const s=await (await fetch('/api/state')).json();
-    estopped=!!s.estopped;
-    $('clr').style.display = estopped ? 'block':'none';
-    $('st').textContent = estopped?'⛔ 已急停':(s.armed?'🟢 駕駛中':'待命');
+    estopped=!!s.estopped; $('clr').style.display=estopped?'block':'none';
+    $('st').textContent=estopped?'⛔ 已急停':(s.armed?'🟢 駕駛中':'待命');
     $('st').className='st '+(estopped?'bad':(s.armed?'on':'off'));
-    $('age').textContent=s.heartbeat_age_ms ?? '-';
-    $('son').textContent=s.sonar ?? '-';
-    $('bat').textContent=s.battery ?? '-';
-    $('duty').textContent=`${s.duty.vx}/${s.duty.wz}`;
-    $('panv').textContent=s.pan ?? '-';
-    $('np').textContent=s.photos;
-    $('vid').textContent = s.vendor_cmd_vel_publishers>0 ? `⚠ 車上另有 ${s.vendor_cmd_vel_publishers} 个厂家 /cmd_vel 發佈者（別同時跑厂家的巡線/追跡）`:'';
+    $('age').textContent=s.heartbeat_age_ms ?? '-'; $('son').textContent=s.sonar ?? '-';
+    $('bat').textContent=s.battery ?? '-'; $('duty').textContent=`${s.duty.vx}/${s.duty.wz}`;
+    $('panv').textContent=s.pan ?? '-'; $('np').textContent=s.photos;
+    $('vid').textContent=s.vendor_cmd_vel_publishers>0?`⚠ 車上另有 ${s.vendor_cmd_vel_publishers} 個厂家 /cmd_vel 發佈者（別同時跑巡線/追跡）`:'';
   }catch(e){ $('st').textContent='⚠ 與車失去連線'; $('st').className='st bad'; }
 },700);
 </script></body></html>"""
